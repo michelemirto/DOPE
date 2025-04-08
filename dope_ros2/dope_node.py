@@ -19,7 +19,7 @@ import transformations
 from inference_script.cuboid import Cuboid3d
 from inference_script.cuboid_pnp_solver import CuboidPNPSolver
 from inference_script.detector import ModelData, ObjectDetector
-import simple_colors
+from colorama import Fore, Style
 # ROS2 packages
 import rclpy
 from rclpy.node import Node
@@ -28,6 +28,7 @@ from sensor_msgs.msg import CameraInfo, Image as ImageSensor_msg
 from std_msgs.msg import String
 from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
 from visualization_msgs.msg import Marker, MarkerArray
+from std_srvs.srv import Trigger
 
 
 class Draw(object):
@@ -97,7 +98,7 @@ class DopeNode(Node):
         super().__init__('dope_node', 
                          automatically_declare_parameters_from_overrides=True, allow_undeclared_parameters=True)
         
-        print(simple_colors.cyan('Setting parameters for DOPE...',['bold']))
+        print(Fore.CYAN + 'Setting parameters for DOPE...' + Style.RESET_ALL)
 
         self.obj_detector = ObjectDetector()
 
@@ -204,7 +205,7 @@ class DopeNode(Node):
                     10
             )
             
-            print(simple_colors.cyan("Publishers successfully created for " + model + " model.", ['bold']))
+            print(Fore.CYAN + "Publishers successfully created for " + model + " model." + Style.RESET_ALL)
 
         # # Start ROS publishers
         self.pub_rgb_dope_points = \
@@ -248,152 +249,167 @@ class DopeNode(Node):
 
         ts = message_filters.TimeSynchronizer([image_sub, info_sub], 1)
         ts.registerCallback(self.image_callback)
-        print(simple_colors.cyan("Subscriber successfully created.", ['bold']))
+        print(Fore.CYAN + "Subscriber successfully created." + Style.RESET_ALL)
 
-        print(simple_colors.cyan("Running DOPE...", [
-              'bold']) + "\nListening to camera topic: '{}'".format(self.get_parameter('topic_camera').get_parameter_value().string_value))
+        self.srv = self.create_service(Trigger, '/dope_service', self.handle_trigger)
+        self.inference = False
+
+        print(Fore.CYAN + "Running DOPE..." + Style.RESET_ALL
+                + "\nListening to camera topic: '{}'".format(self.get_parameter('topic_camera').get_parameter_value().string_value))
         print("\nCtrl-C to stop")
 
+    def handle_trigger(self, req, resp):
+        self.inference = not self.inference
+        resp.success = True
+        if(self.inference):
+            resp.message="Start reading camera"
+            print(Fore.GREEN + "Start reading camera" + Style.RESET_ALL)
+        else:
+            resp.message="Stop reading camera"
+            print(Fore.GREEN + "Stop reading camera" + Style.RESET_ALL)
+        return resp
 
     def image_callback(self, image_msg, camera_info):
-        
+
         """Image callback"""
-        msg_dim = String()
-        img = self.cv_bridge.imgmsg_to_cv2(image_msg, "rgb8")
-        # cv2.imwrite('img.png', cv2.cvtColor(img, cv2.COLOR_BGR2RGB))  # for debugging
+        if self.inference:
 
-        # Update camera matrix and distortion coefficients
-        if self.input_is_rectified:
-            # P: NDArray[(3, 4), float] = np.matrix(camera_info.p)
-            P = np.matrix(camera_info.p, dtype='float64')
-            P.resize((3, 4))
-            camera_matrix = P[:, :3]
+            msg_dim = String()
+            img = self.cv_bridge.imgmsg_to_cv2(image_msg, "rgb8")
+            # cv2.imwrite('img.png', cv2.cvtColor(img, cv2.COLOR_BGR2RGB))  # for debugging
 
-            dist_coeffs = np.zeros((4, 1))
-        else:
-            camera_matrix = np.matrix(camera_info.k, dtype='float64')
-            camera_matrix.resize((3, 3))
+            # Update camera matrix and distortion coefficients
+            if self.input_is_rectified:
+                # P: NDArray[(3, 4), float] = np.matrix(camera_info.p)
+                P = np.matrix(camera_info.p, dtype='float64')
+                P.resize((3, 4))
+                camera_matrix = P[:, :3]
 
-            dist_coeffs = np.matrix(camera_info.d, dtype='float64')
-            dist_coeffs.resize((len(camera_info.d), 1))
+                dist_coeffs = np.zeros((4, 1))
+            else:
+                camera_matrix = np.matrix(camera_info.k, dtype='float64')
+                camera_matrix.resize((3, 3))
 
-        # Downscale image if necessary
-        height, width, _ = img.shape
-        scaling_factor = float(self.downscale_height) / height
-        if scaling_factor < 1.0:
-            camera_matrix[:2] *= scaling_factor
-            img = cv2.resize(img, (int(scaling_factor * width),
-                             int(scaling_factor * height)))
+                dist_coeffs = np.matrix(camera_info.d, dtype='float64')
+                dist_coeffs.resize((len(camera_info.d), 1))
 
-        for m in self.models:
-            self.pnp_solvers[m].set_camera_intrinsic_matrix(camera_matrix)
-            self.pnp_solvers[m].set_dist_coeffs(dist_coeffs)
+            # Downscale image if necessary
+            height, width, _ = img.shape
+            scaling_factor = float(self.downscale_height) / height
+            if scaling_factor < 1.0:
+                camera_matrix[:2] *= scaling_factor
+                img = cv2.resize(img, (int(scaling_factor * width),
+                                int(scaling_factor * height)))
 
-        # Copy and draw image
-        
-        img_copy = img.copy()
-        im = Image.fromarray(img_copy)
-        draw = Draw(im)
+            for m in self.models:
+                self.pnp_solvers[m].set_camera_intrinsic_matrix(camera_matrix)
+                self.pnp_solvers[m].set_dist_coeffs(dist_coeffs)
 
-        detection_array = Detection3DArray()
-        detection_array.header = image_msg.header
+            # Copy and draw image
+            
+            img_copy = img.copy()
+            im = Image.fromarray(img_copy)
+            draw = Draw(im)
 
-
-        for m in self.models:
-            publish_belief_img = (self.pub_belief[m].get_subscription_count() > 0)
-
-            # Detect object
-            results, im_belief = self.obj_detector.detect_object_in_image(
-                self.models[m].net,
-                self.pnp_solvers[m],
-                img,
-                self.config_detect,
-                make_belief_debug_img=publish_belief_img,
-                overlay_image=self.overlay_belief_images
-            )
+            detection_array = Detection3DArray()
+            detection_array.header = image_msg.header
 
 
-            # Publish pose and overlay cube on image
-            for i_r, result in enumerate(results):
-                
-                if result["location"] is None:
-                    continue
-                loc = result["location"]
-                ori_ = result["quaternion"]
-                ori = np.array([ori_[3], ori_[0], ori_[1], ori_[2]], dtype='float64')
+            for m in self.models:
+                publish_belief_img = (self.pub_belief[m].get_subscription_count() > 0)
 
-                transformed_ori = transformations.quaternion_multiply(ori, self.model_transforms[m])
-                
-
-                # rotate bbox dimensions if necessary
-                # (this only works properly if model_transform is in 90 degree angles)
-                dims = rotate_vector(
-                    vector=self.dimensions[m], quaternion=self.model_transforms[m])
-                dims = np.absolute(dims)
-                dims = tuple(dims)
-
-                pose_msg = PoseStamped()
-                pose_msg.header = image_msg.header
-                CONVERT_SCALE_CM_TO_METERS = 100
-                pose_msg.pose.position.x = loc[0] / CONVERT_SCALE_CM_TO_METERS
-                pose_msg.pose.position.y = loc[1] / CONVERT_SCALE_CM_TO_METERS
-                pose_msg.pose.position.z = loc[2] / CONVERT_SCALE_CM_TO_METERS
-                pose_msg.pose.orientation.x = transformed_ori[1]
-                pose_msg.pose.orientation.y = transformed_ori[2]
-                pose_msg.pose.orientation.z = transformed_ori[3]
-                pose_msg.pose.orientation.w = transformed_ori[0]
-
-                # Publish
-                self.pubs[m].publish(pose_msg)
-                
-                msg_dim.data = str(dims)
-                self.pub_dimension[m].publish(msg_dim)
-                # self.pub_dimension[m].publish(String(dims))
-
-                # Add to Detection3DArray
-                detection = Detection3D()
-                hypothesis = ObjectHypothesisWithPose()
+                # Detect object
+                results, im_belief = self.obj_detector.detect_object_in_image(
+                    self.models[m].net,
+                    self.pnp_solvers[m],
+                    img,
+                    self.config_detect,
+                    make_belief_debug_img=publish_belief_img,
+                    overlay_image=self.overlay_belief_images
+                )
 
 
-                hypothesis.hypothesis.class_id = str(self.class_ids[result["name"]])
-                hypothesis.hypothesis.score = float(result["score"])
-                hypothesis.pose.pose = pose_msg.pose
-                
-                detection.results.append(hypothesis)
+                # Publish pose and overlay cube on image
+                for i_r, result in enumerate(results):
+                    
+                    if result["location"] is None:
+                        continue
+                    loc = result["location"]
+                    ori_ = result["quaternion"]
+                    ori = np.array([ori_[3], ori_[0], ori_[1], ori_[2]], dtype='float64')
 
-                
-                detection.bbox.center = pose_msg.pose
-                detection.bbox.size.x = dims[0] / CONVERT_SCALE_CM_TO_METERS
-                detection.bbox.size.y = dims[1] / CONVERT_SCALE_CM_TO_METERS
-                detection.bbox.size.z = dims[2] / CONVERT_SCALE_CM_TO_METERS
-                detection_array.detections.append(detection)
+                    transformed_ori = transformations.quaternion_multiply(ori, self.model_transforms[m])
+                    
 
-                # Draw the cube
-                if None not in result['projected_points']:
-                    points2d = []
-                    for pair in result['projected_points']:
-                        points2d.append(tuple(pair))
-                    draw.draw_cube(points2d, self.draw_colors[m])
+                    # rotate bbox dimensions if necessary
+                    # (this only works properly if model_transform is in 90 degree angles)
+                    dims = rotate_vector(
+                        vector=self.dimensions[m], quaternion=self.model_transforms[m])
+                    dims = np.absolute(dims)
+                    dims = tuple(dims)
+
+                    pose_msg = PoseStamped()
+                    pose_msg.header = image_msg.header
+                    CONVERT_SCALE_CM_TO_METERS = 100
+                    pose_msg.pose.position.x = loc[0] / CONVERT_SCALE_CM_TO_METERS
+                    pose_msg.pose.position.y = loc[1] / CONVERT_SCALE_CM_TO_METERS
+                    pose_msg.pose.position.z = loc[2] / CONVERT_SCALE_CM_TO_METERS
+                    pose_msg.pose.orientation.x = transformed_ori[1]
+                    pose_msg.pose.orientation.y = transformed_ori[2]
+                    pose_msg.pose.orientation.z = transformed_ori[3]
+                    pose_msg.pose.orientation.w = transformed_ori[0]
+
+                    # Publish
+                    self.pubs[m].publish(pose_msg)
+                    
+                    msg_dim.data = str(dims)
+                    self.pub_dimension[m].publish(msg_dim)
+                    # self.pub_dimension[m].publish(String(dims))
+
+                    # Add to Detection3DArray
+                    detection = Detection3D()
+                    hypothesis = ObjectHypothesisWithPose()
+
+
+                    hypothesis.hypothesis.class_id = str(self.class_ids[result["name"]])
+                    hypothesis.hypothesis.score = float(result["score"])
+                    hypothesis.pose.pose = pose_msg.pose
+                    
+                    detection.results.append(hypothesis)
+
+                    
+                    detection.bbox.center = pose_msg.pose
+                    detection.bbox.size.x = dims[0] / CONVERT_SCALE_CM_TO_METERS
+                    detection.bbox.size.y = dims[1] / CONVERT_SCALE_CM_TO_METERS
+                    detection.bbox.size.z = dims[2] / CONVERT_SCALE_CM_TO_METERS
+                    detection_array.detections.append(detection)
+
+                    # Draw the cube
+                    if None not in result['projected_points']:
+                        points2d = []
+                        for pair in result['projected_points']:
+                            points2d.append(tuple(pair))
+                        draw.draw_cube(points2d, self.draw_colors[m])
 
 
 
-            # Publish the belief image
-            if publish_belief_img:
-                belief_img = self.cv_bridge.cv2_to_imgmsg(
-                    np.array(im_belief)[..., ::-1], "bgr8")
-                belief_img.header = camera_info.header
-                self.pub_belief[m].publish(belief_img)
+                # Publish the belief image
+                if publish_belief_img:
+                    belief_img = self.cv_bridge.cv2_to_imgmsg(
+                        np.array(im_belief)[..., ::-1], "bgr8")
+                    belief_img.header = camera_info.header
+                    self.pub_belief[m].publish(belief_img)
 
 
-        # Publish the image with results overlaid
-        
-        rgb_points_img = CvBridge().cv2_to_imgmsg(
-            np.array(im)[..., ::-1], "bgr8")
-        rgb_points_img.header = camera_info.header
-        self.pub_rgb_dope_points.publish(rgb_points_img)
-        self.pub_camera_info.publish(camera_info)
-        self.pub_detections.publish(detection_array)
-        self.publish_markers(detection_array)
+            # Publish the image with results overlaid
+            
+            rgb_points_img = CvBridge().cv2_to_imgmsg(
+                np.array(im)[..., ::-1], "bgr8")
+            rgb_points_img.header = camera_info.header
+            self.pub_rgb_dope_points.publish(rgb_points_img)
+            self.pub_camera_info.publish(camera_info)
+            self.pub_detections.publish(detection_array)
+            self.publish_markers(detection_array)
 
 
     def publish_markers(self, detection_array):

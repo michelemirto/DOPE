@@ -82,13 +82,6 @@ Visualization Manager:
       Shaft Length: 1
       Shaft Radius: 0.05000000074505806
       Shape: Axes
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /dope/pose_lime
       Value: false
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
@@ -160,12 +153,6 @@ Visualization Manager:
       Image Rendering: background and overlay
       Name: Camera
       Overlay Alpha: 0.5
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /dope/belief_lime
       Value: true
       Visibility:
         Camera: true
